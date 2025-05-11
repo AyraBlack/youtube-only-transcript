@@ -24,7 +24,7 @@ if not os.path.exists(TRANSCRIPTS_TEMP_DIR):
     app.logger.info(f"Created temporary transcripts directory: {TRANSCRIPTS_TEMP_DIR}")
 
 # --- Constants ---
-SOCKET_TIMEOUT_SECONDS = 180 # yt-dlp's own network timeout
+SOCKET_TIMEOUT_SECONDS = 180
 COMMON_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # --- Read Proxy from Environment Variable ---
@@ -46,28 +46,74 @@ def sanitize_filename(name_str, max_length=60):
     return s[:max_length]
 
 def vtt_to_plaintext(vtt_content):
-    processed_lines = []
-    for line in vtt_content.splitlines():
+    """
+    Converts VTT subtitle content to plain text, more robustly handling metadata and duplicates.
+    """
+    app.logger.debug(f"Original VTT content received for parsing:\n{vtt_content[:500]}...") # Log start of VTT
+
+    lines = vtt_content.splitlines()
+    actual_text_lines = []
+    
+    # State to identify actual subtitle text blocks
+    # A subtitle text block usually follows a timestamp line.
+    # We will collect lines after a timestamp until we hit an empty line or another timestamp/cue number.
+    expecting_text = False 
+
+    for line in lines:
         line_stripped = line.strip()
-        if line_stripped == "WEBVTT" or "-->" in line_stripped or \
-           (line_stripped.isdigit() and not any(c.isalpha() for c in line_stripped)):
+
+        if not line_stripped: # Empty line usually signifies end of a text block
+            expecting_text = False
             continue
-        if line_stripped:
+
+        if line_stripped == "WEBVTT":
+            continue
+        
+        # Skip lines that are purely numeric (likely cue numbers) unless we are in a text block
+        if line_stripped.isdigit() and not expecting_text:
+            continue
+            
+        # Skip lines that look like VTT metadata headers often added by yt-dlp
+        if line_stripped.lower().startswith("kind:") or \
+           line_stripped.lower().startswith("language:"):
+            expecting_text = False # Reset if we hit these headers
+            continue
+
+        if "-->" in line_stripped: # Timestamp line
+            expecting_text = True # Next non-empty lines are dialogue
+            continue
+        
+        if expecting_text:
+            # Clean VTT tags (e.g., <v Author>Text</v> or <i>Text</i> or <b>Text</b>)
             cleaned_line = re.sub(r'<[^>]+>', '', line_stripped)
+            # Replace common HTML entities and non-breaking spaces
             cleaned_line = cleaned_line.replace(' ', ' ').replace('&', '&').replace('<', '<').replace('>', '>')
-            processed_lines.append(cleaned_line)
-    if not processed_lines: return ""
-    deduplicated_text_lines = []
-    last_added_line_stripped = None
-    for text_line in processed_lines:
-        current_line_stripped = text_line.strip()
-        if current_line_stripped and current_line_stripped != last_added_line_stripped:
-            deduplicated_text_lines.append(text_line)
-            last_added_line_stripped = current_line_stripped
-        elif not current_line_stripped and last_added_line_stripped is not None:
-            deduplicated_text_lines.append(text_line)
-            last_added_line_stripped = None
-    return "\n".join(deduplicated_text_lines)
+            
+            if cleaned_line: # Only add if there's actual text after cleaning
+                actual_text_lines.append(cleaned_line)
+        # else: # If not expecting text, and it's not metadata, we ignore it.
+            # app.logger.debug(f"Skipping non-text VTT line: {line_stripped}")
+
+
+    if not actual_text_lines:
+        app.logger.warning("No actual text lines extracted from VTT content.")
+        return ""
+
+    # Deduplicate: Only add a line if it's different from the *very last* line added.
+    # This handles cases where the same text is repeated for different time cues consecutively.
+    deduplicated_output = []
+    if actual_text_lines: # Ensure there's at least one line
+        deduplicated_output.append(actual_text_lines[0]) # Add the first line
+        for i in range(1, len(actual_text_lines)):
+            # Compare current line with the last line *added to the output*
+            if actual_text_lines[i].strip() != deduplicated_output[-1].strip():
+                deduplicated_output.append(actual_text_lines[i])
+            # else:
+                # app.logger.debug(f"Skipping duplicate line: '{actual_text_lines[i]}'")
+                
+    final_text = "\n".join(deduplicated_output)
+    app.logger.debug(f"Parsed plain text (first 500 chars):\n{final_text[:500]}...")
+    return final_text
 
 def _get_common_ydl_opts(include_logger=True):
     opts = {
@@ -173,7 +219,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 app.logger.error(f"Error in audio extraction: {e_audio}", exc_info=True)
                 if not response["error"]: response["error"] = audio_error
 
-    is_youtube_url = "youtube.com/" in video_url if video_url else False # Added check for video_url
+    is_youtube_url = "youtube.com/" in video_url if video_url else False
     if perform_transcript_extraction and is_youtube_url:
         temp_vtt_basename = f"transcript_{uuid.uuid4().hex}"
         temp_vtt_dir = TRANSCRIPTS_TEMP_DIR
@@ -183,9 +229,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
         ydl_opts_transcript = {
             **common_opts_transcript,
             'writesubtitles': True, 'writeautomaticsub': True,
-            # --- MODIFIED LANGUAGE PRIORITY ---
             'subtitleslangs': ['en', 'ro'], # Try English first, then Romanian
-            # --- END OF MODIFICATION ---
             'subtitlesformat': 'vtt', 'skip_download': True,
             'outtmpl': output_template_transcript_abs,
             'quiet': False, 'noprogress': False,
@@ -198,9 +242,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
 
                 requested_subs = info_dict_subs.get('requested_subtitles')
                 if requested_subs:
-                    # --- MODIFIED LOGIC TO RESPECT NEW LANGUAGE ORDER ---
                     for lang_code in ['en', 'ro']:
-                    # --- END OF MODIFICATION ---
                         if lang_code in requested_subs:
                             sub_info = requested_subs[lang_code]
                             if sub_info.get('filepath') and os.path.exists(sub_info['filepath']):
@@ -210,9 +252,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                                 break
                 if not downloaded_vtt_path:
                     app.logger.info("Transcript path not in 'requested_subtitles', scanning directory...")
-                    # --- MODIFIED LOGIC TO RESPECT NEW LANGUAGE ORDER ---
                     for lang in ['en', 'ro']:
-                    # --- END OF MODIFICATION ---
                         potential_path = os.path.join(temp_vtt_dir, f"{temp_vtt_basename}.{lang}.vtt")
                         if os.path.exists(potential_path):
                             downloaded_vtt_path = potential_path
@@ -223,7 +263,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 if downloaded_vtt_path:
                     with open(downloaded_vtt_path, 'r', encoding='utf-8') as f_vtt:
                         vtt_content = f_vtt.read()
-                    response["transcript_text"] = vtt_to_plaintext(vtt_content)
+                    response["transcript_text"] = vtt_to_plaintext(vtt_content) # Use the improved parser
                     app.logger.info(f"Transcript parsed for language: {response['transcript_language_detected']}")
                 else:
                     transcript_error = "Transcript VTT not found or not available in EN/RO."
@@ -240,8 +280,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
             if not response["error"]: response["error"] = transcript_error
         finally:
             if downloaded_vtt_path and os.path.exists(downloaded_vtt_path):
-                # Double check before deleting
-                if os.path.exists(downloaded_vtt_path):
+                if os.path.exists(downloaded_vtt_path): 
                     try:
                         os.remove(downloaded_vtt_path)
                         app.logger.info(f"Deleted temporary transcript file: {downloaded_vtt_path}")
@@ -259,7 +298,7 @@ def api_process_video_details_route():
     app.logger.info("Received request for /api/process_video_details")
     video_url_param = request.args.get('url')
 
-    is_youtube = "youtube.com/" in video_url_param if video_url_param else False # Check if video_url_param is not None
+    is_youtube = "youtube.com/" in video_url_param if video_url_param else False
 
     get_audio_str = request.args.get('get_audio', 'true').lower()
     default_get_transcript = 'true' if is_youtube else 'false'
