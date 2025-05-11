@@ -1,0 +1,5 @@
+# nixpacks.toml
+
+# Specify system packages to install
+[phases.setup]
+aptPkgs = ["ffmpeg"]
