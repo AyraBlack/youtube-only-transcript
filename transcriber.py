@@ -9,7 +9,7 @@ from datetime import datetime # For timestamped filenames
 
 # --- Flask App Setup ---
 app = Flask(__name__)
-app.logger.setLevel(logging.INFO)
+app.logger.setLevel(logging.INFO) # Set logging level for the application logger
 
 # --- Directory Configuration ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,86 +36,84 @@ else:
     app.logger.info("PROXY_URL environment variable not set. Operating without proxy.")
 
 def is_ffmpeg_available():
+    """Checks if FFmpeg is installed and accessible."""
     return shutil.which("ffmpeg") is not None
 
-def sanitize_filename(name_str, max_length=60):
-    s = name_str.replace(' ', '_')
+def sanitize_filename(name_str, max_length=60): 
+    """Sanitizes a string to be a safe filename component."""
+    s = name_str.replace(' ', '_') 
     s = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in s)
-    s = re.sub(r'_+', '_', s)
-    s = s.strip('_')
+    s = re.sub(r'_+', '_', s) 
+    s = s.strip('_') 
     return s[:max_length]
 
 def vtt_to_plaintext(vtt_content):
     """
     Converts VTT subtitle content to plain text, more robustly handling metadata and duplicates.
     """
-    app.logger.debug(f"Original VTT content received for parsing:\n{vtt_content[:500]}...") # Log start of VTT
+    app.logger.debug(f"Original VTT content for parsing (first 500 chars):\n{vtt_content[:500]}...")
 
     lines = vtt_content.splitlines()
-    actual_text_lines = []
-    
-    # State to identify actual subtitle text blocks
-    # A subtitle text block usually follows a timestamp line.
-    # We will collect lines after a timestamp until we hit an empty line or another timestamp/cue number.
-    expecting_text = False 
+    collected_text_segments = []
+    current_segment_lines = []
 
     for line in lines:
         line_stripped = line.strip()
 
-        if not line_stripped: # Empty line usually signifies end of a text block
-            expecting_text = False
-            continue
-
-        if line_stripped == "WEBVTT":
-            continue
-        
-        # Skip lines that are purely numeric (likely cue numbers) unless we are in a text block
-        if line_stripped.isdigit() and not expecting_text:
-            continue
-            
-        # Skip lines that look like VTT metadata headers often added by yt-dlp
-        if line_stripped.lower().startswith("kind:") or \
+        # Skip common VTT headers and metadata lines explicitly
+        if line_stripped == "WEBVTT" or \
+           line_stripped.lower().startswith("kind:") or \
            line_stripped.lower().startswith("language:"):
-            expecting_text = False # Reset if we hit these headers
             continue
 
-        if "-->" in line_stripped: # Timestamp line
-            expecting_text = True # Next non-empty lines are dialogue
+        # Timestamp lines indicate the start of a new cue block (and end of previous text)
+        if "-->" in line_stripped:
+            if current_segment_lines: # If we have collected lines for the previous segment
+                collected_text_segments.append(" ".join(current_segment_lines))
+                current_segment_lines = [] # Reset for the new cue
+            continue
+
+        # Skip lines that are purely numeric (likely cue numbers) if they appear alone
+        if line_stripped.isdigit() and not current_segment_lines:
             continue
         
-        if expecting_text:
-            # Clean VTT tags (e.g., <v Author>Text</v> or <i>Text</i> or <b>Text</b>)
-            cleaned_line = re.sub(r'<[^>]+>', '', line_stripped)
-            # Replace common HTML entities and non-breaking spaces
-            cleaned_line = cleaned_line.replace(' ', ' ').replace('&', '&').replace('<', '<').replace('>', '>')
-            
+        # If it's not metadata, not a timestamp, and not an empty line, it's likely text
+        if line_stripped:
+            cleaned_line = re.sub(r'<[^>]+>', '', line_stripped) # Remove VTT tags
+            cleaned_line = cleaned_line.replace(' ', ' ').replace('&', '&').replace('<', '<').replace('>', '>') # Handle common entities
             if cleaned_line: # Only add if there's actual text after cleaning
-                actual_text_lines.append(cleaned_line)
-        # else: # If not expecting text, and it's not metadata, we ignore it.
-            # app.logger.debug(f"Skipping non-text VTT line: {line_stripped}")
+                current_segment_lines.append(cleaned_line)
+        elif current_segment_lines: # An empty line after text means the segment ended
+            collected_text_segments.append(" ".join(current_segment_lines))
+            current_segment_lines = []
 
 
-    if not actual_text_lines:
-        app.logger.warning("No actual text lines extracted from VTT content.")
+    # Add any remaining text from the last segment
+    if current_segment_lines:
+        collected_text_segments.append(" ".join(current_segment_lines))
+
+    if not collected_text_segments:
+        app.logger.warning("No text segments extracted from VTT content after initial parsing.")
         return ""
 
-    # Deduplicate: Only add a line if it's different from the *very last* line added.
-    # This handles cases where the same text is repeated for different time cues consecutively.
-    deduplicated_output = []
-    if actual_text_lines: # Ensure there's at least one line
-        deduplicated_output.append(actual_text_lines[0]) # Add the first line
-        for i in range(1, len(actual_text_lines)):
-            # Compare current line with the last line *added to the output*
-            if actual_text_lines[i].strip() != deduplicated_output[-1].strip():
-                deduplicated_output.append(actual_text_lines[i])
+    # Deduplicate consecutive identical segments
+    deduplicated_final_lines = []
+    if collected_text_segments:
+        deduplicated_final_lines.append(collected_text_segments[0]) # Add the first segment
+        for i in range(1, len(collected_text_segments)):
+            # Compare current segment with the last segment *added to the output*
+            if collected_text_segments[i].strip() != deduplicated_final_lines[-1].strip():
+                deduplicated_final_lines.append(collected_text_segments[i])
             # else:
-                # app.logger.debug(f"Skipping duplicate line: '{actual_text_lines[i]}'")
+                # app.logger.debug(f"Skipping duplicate segment: '{collected_text_segments[i]}'")
                 
-    final_text = "\n".join(deduplicated_output)
+    final_text = "\n".join(deduplicated_final_lines)
+    app.logger.info(f"Successfully parsed VTT to plain text. Output length: {len(final_text)}")
     app.logger.debug(f"Parsed plain text (first 500 chars):\n{final_text[:500]}...")
     return final_text
 
 def _get_common_ydl_opts(include_logger=True):
+    """Helper function for common yt-dlp options, including proxy."""
     opts = {
         'socket_timeout': SOCKET_TIMEOUT_SECONDS,
         'http_headers': {'User-Agent': COMMON_USER_AGENT},
@@ -130,11 +128,11 @@ def _get_common_ydl_opts(include_logger=True):
 
 def process_video_details(video_url, perform_audio_extraction=True, perform_transcript_extraction=False, audio_format="mp3"):
     app.logger.info(f"Processing video details for URL: {video_url}, get_audio: {perform_audio_extraction}, get_transcript: {perform_transcript_extraction}")
-
+    
     response = {
         "video_url_processed": video_url,
         "video_title": None,
-        "author": None,
+        "author": None, 
         "audio_download_url": None,
         "audio_server_path": None,
         "transcript_text": None,
@@ -146,13 +144,13 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
         common_opts_info = _get_common_ydl_opts()
         info_opts = {
             **common_opts_info,
-            'quiet': True,
-            'extract_flat': 'in_playlist',
+            'quiet': True, 
+            'extract_flat': 'in_playlist', 
         }
         with yt_dlp.YoutubeDL(info_opts) as ydl_info:
             app.logger.info(f"Fetching initial metadata for: {video_url}...")
             info_dict = ydl_info.extract_info(video_url, download=False)
-
+            
             response["video_title"] = info_dict.get('title', f'unknown_title_{uuid.uuid4().hex[:6]}')
             response["author"] = info_dict.get('uploader', info_dict.get('channel', f'unknown_author_{uuid.uuid4().hex[:6]}'))
             app.logger.info(f"Metadata fetched - Title: '{response['video_title']}', Author: '{response['author']}'")
@@ -160,7 +158,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
     except yt_dlp.utils.DownloadError as de:
         app.logger.error(f"yt-dlp DownloadError during initial metadata fetch for {video_url}: {de}")
         response["error"] = f"Failed to fetch initial video metadata: {str(de)}"
-        return response
+        return response 
     except Exception as e:
         app.logger.error(f"Unexpected error during initial metadata fetch for {video_url}: {e}", exc_info=True)
         response["error"] = f"Unexpected error fetching initial video metadata: {str(e)}"
@@ -175,7 +173,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 current_time_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 sanitized_title_part = sanitize_filename(response["video_title"])
                 base_output_filename_safe = f"{current_time_str}_{sanitized_title_part}"
-
+                
                 request_folder_name = base_output_filename_safe
                 request_download_dir_abs = os.path.join(DOWNLOADS_BASE_DIR, request_folder_name)
                 if not os.path.exists(request_download_dir_abs):
@@ -190,7 +188,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                     'format': 'bestaudio/best',
                     'outtmpl': output_template_audio_abs,
                     'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': audio_format}],
-                    'quiet': False, 'noprogress': False,
+                    'quiet': False, 'noprogress': False, 
                 }
                 with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl_audio:
                     app.logger.info(f"Starting audio download/extraction for {video_url}...")
@@ -198,33 +196,33 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                     if error_code != 0:
                         audio_error = f"yt-dlp audio process failed (code {error_code})."
                         app.logger.error(audio_error)
-                        if not response["error"]: response["error"] = audio_error
+                        if not response["error"]: response["error"] = audio_error 
                     else:
                         final_audio_filename_on_disk = f"{base_output_filename_safe}.{audio_format}"
                         response["audio_server_path"] = os.path.join(request_download_dir_abs, final_audio_filename_on_disk)
                         response["audio_relative_path"] = os.path.join(request_folder_name, final_audio_filename_on_disk)
                         if os.path.exists(response["audio_server_path"]):
                             app.logger.info(f"Audio extracted: {response['audio_server_path']}")
-                            response["audio_download_url"] = url_for('serve_downloaded_file',
-                                                                    relative_file_path=response["audio_relative_path"],
+                            response["audio_download_url"] = url_for('serve_downloaded_file', 
+                                                                    relative_file_path=response["audio_relative_path"], 
                                                                     _external=True)
                         else:
                             audio_error = f"Audio file not found post-processing at {response['audio_server_path']}."
                             app.logger.error(audio_error)
                             if not response["error"]: response["error"] = audio_error
-                            response["audio_server_path"] = None
+                            response["audio_server_path"] = None 
                             response["audio_relative_path"] = None
             except Exception as e_audio:
                 audio_error = f"Unexpected error during audio extraction: {str(e_audio)}"
                 app.logger.error(f"Error in audio extraction: {e_audio}", exc_info=True)
                 if not response["error"]: response["error"] = audio_error
-
-    is_youtube_url = "youtube.com/" in video_url if video_url else False
+    
+    is_youtube_url = "youtube.com/" in video_url if video_url else False 
     if perform_transcript_extraction and is_youtube_url:
         temp_vtt_basename = f"transcript_{uuid.uuid4().hex}"
         temp_vtt_dir = TRANSCRIPTS_TEMP_DIR
         output_template_transcript_abs = os.path.join(temp_vtt_dir, temp_vtt_basename)
-
+        
         common_opts_transcript = _get_common_ydl_opts()
         ydl_opts_transcript = {
             **common_opts_transcript,
@@ -239,10 +237,10 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
             with yt_dlp.YoutubeDL(ydl_opts_transcript) as ydl_transcript:
                 app.logger.info(f"Starting transcript download for {video_url} (langs: en, ro)...")
                 info_dict_subs = ydl_transcript.extract_info(video_url, download=True)
-
+                
                 requested_subs = info_dict_subs.get('requested_subtitles')
                 if requested_subs:
-                    for lang_code in ['en', 'ro']:
+                    for lang_code in ['en', 'ro']: 
                         if lang_code in requested_subs:
                             sub_info = requested_subs[lang_code]
                             if sub_info.get('filepath') and os.path.exists(sub_info['filepath']):
@@ -250,7 +248,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                                 response["transcript_language_detected"] = lang_code
                                 app.logger.info(f"Transcript VTT downloaded: {downloaded_vtt_path} (Lang: {lang_code})")
                                 break
-                if not downloaded_vtt_path:
+                if not downloaded_vtt_path: 
                     app.logger.info("Transcript path not in 'requested_subtitles', scanning directory...")
                     for lang in ['en', 'ro']:
                         potential_path = os.path.join(temp_vtt_dir, f"{temp_vtt_basename}.{lang}.vtt")
@@ -259,7 +257,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                             response["transcript_language_detected"] = lang
                             app.logger.info(f"Transcript VTT found by scan: {downloaded_vtt_path} (Lang: {lang})")
                             break
-
+                
                 if downloaded_vtt_path:
                     with open(downloaded_vtt_path, 'r', encoding='utf-8') as f_vtt:
                         vtt_content = f_vtt.read()
@@ -268,8 +266,8 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 else:
                     transcript_error = "Transcript VTT not found or not available in EN/RO."
                     app.logger.warning(transcript_error + f" for {video_url}")
-                    if not response["error"]: response["error"] = transcript_error
-
+                    if not response["error"]: response["error"] = transcript_error 
+        
         except yt_dlp.utils.DownloadError as de_subs:
             transcript_error = f"yt-dlp DownloadError during transcript fetch: {str(de_subs)}"
             app.logger.error(transcript_error + f" for {video_url}")
@@ -297,9 +295,9 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
 def api_process_video_details_route():
     app.logger.info("Received request for /api/process_video_details")
     video_url_param = request.args.get('url')
-
+    
     is_youtube = "youtube.com/" in video_url_param if video_url_param else False
-
+    
     get_audio_str = request.args.get('get_audio', 'true').lower()
     default_get_transcript = 'true' if is_youtube else 'false'
     get_transcript_str = request.args.get('get_transcript', default_get_transcript).lower()
@@ -310,16 +308,16 @@ def api_process_video_details_route():
 
     perform_audio = get_audio_str == 'true'
     perform_transcript = get_transcript_str == 'true'
-
+    
     app.logger.info(f"Processing URL: {video_url_param}, Get Audio: {perform_audio}, Get Transcript: {perform_transcript}")
-
-    result = process_video_details(video_url_param,
-                                   perform_audio_extraction=perform_audio,
+    
+    result = process_video_details(video_url_param, 
+                                   perform_audio_extraction=perform_audio, 
                                    perform_transcript_extraction=perform_transcript)
 
     critical_error_occured = result.get("error") and not (result.get("audio_download_url") or result.get("transcript_text"))
     status_code = 500 if critical_error_occured else 200
-
+    
     return jsonify(result), status_code
 
 @app.route('/files/<path:relative_file_path>')
