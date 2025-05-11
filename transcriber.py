@@ -24,7 +24,7 @@ if not os.path.exists(TRANSCRIPTS_TEMP_DIR):
     app.logger.info(f"Created temporary transcripts directory: {TRANSCRIPTS_TEMP_DIR}")
 
 # --- Constants ---
-SOCKET_TIMEOUT_SECONDS = 180
+SOCKET_TIMEOUT_SECONDS = 180 # yt-dlp's own network timeout
 COMMON_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 # --- Read Proxy from Environment Variable ---
@@ -74,7 +74,7 @@ def _get_common_ydl_opts(include_logger=True):
         'socket_timeout': SOCKET_TIMEOUT_SECONDS,
         'http_headers': {'User-Agent': COMMON_USER_AGENT},
         'noplaylist': True,
-        'verbose': False, 
+        'verbose': False,
     }
     if include_logger:
         opts['logger'] = app.logger
@@ -84,11 +84,11 @@ def _get_common_ydl_opts(include_logger=True):
 
 def process_video_details(video_url, perform_audio_extraction=True, perform_transcript_extraction=False, audio_format="mp3"):
     app.logger.info(f"Processing video details for URL: {video_url}, get_audio: {perform_audio_extraction}, get_transcript: {perform_transcript_extraction}")
-    
+
     response = {
         "video_url_processed": video_url,
         "video_title": None,
-        "author": None, 
+        "author": None,
         "audio_download_url": None,
         "audio_server_path": None,
         "transcript_text": None,
@@ -100,13 +100,13 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
         common_opts_info = _get_common_ydl_opts()
         info_opts = {
             **common_opts_info,
-            'quiet': True, 
-            'extract_flat': 'in_playlist', 
+            'quiet': True,
+            'extract_flat': 'in_playlist',
         }
         with yt_dlp.YoutubeDL(info_opts) as ydl_info:
             app.logger.info(f"Fetching initial metadata for: {video_url}...")
             info_dict = ydl_info.extract_info(video_url, download=False)
-            
+
             response["video_title"] = info_dict.get('title', f'unknown_title_{uuid.uuid4().hex[:6]}')
             response["author"] = info_dict.get('uploader', info_dict.get('channel', f'unknown_author_{uuid.uuid4().hex[:6]}'))
             app.logger.info(f"Metadata fetched - Title: '{response['video_title']}', Author: '{response['author']}'")
@@ -114,7 +114,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
     except yt_dlp.utils.DownloadError as de:
         app.logger.error(f"yt-dlp DownloadError during initial metadata fetch for {video_url}: {de}")
         response["error"] = f"Failed to fetch initial video metadata: {str(de)}"
-        return response 
+        return response
     except Exception as e:
         app.logger.error(f"Unexpected error during initial metadata fetch for {video_url}: {e}", exc_info=True)
         response["error"] = f"Unexpected error fetching initial video metadata: {str(e)}"
@@ -129,7 +129,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 current_time_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 sanitized_title_part = sanitize_filename(response["video_title"])
                 base_output_filename_safe = f"{current_time_str}_{sanitized_title_part}"
-                
+
                 request_folder_name = base_output_filename_safe
                 request_download_dir_abs = os.path.join(DOWNLOADS_BASE_DIR, request_folder_name)
                 if not os.path.exists(request_download_dir_abs):
@@ -144,7 +144,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                     'format': 'bestaudio/best',
                     'outtmpl': output_template_audio_abs,
                     'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': audio_format}],
-                    'quiet': False, 'noprogress': False, 
+                    'quiet': False, 'noprogress': False,
                 }
                 with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl_audio:
                     app.logger.info(f"Starting audio download/extraction for {video_url}...")
@@ -152,38 +152,38 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                     if error_code != 0:
                         audio_error = f"yt-dlp audio process failed (code {error_code})."
                         app.logger.error(audio_error)
-                        if not response["error"]: response["error"] = audio_error 
+                        if not response["error"]: response["error"] = audio_error
                     else:
                         final_audio_filename_on_disk = f"{base_output_filename_safe}.{audio_format}"
                         response["audio_server_path"] = os.path.join(request_download_dir_abs, final_audio_filename_on_disk)
                         response["audio_relative_path"] = os.path.join(request_folder_name, final_audio_filename_on_disk)
                         if os.path.exists(response["audio_server_path"]):
                             app.logger.info(f"Audio extracted: {response['audio_server_path']}")
-                            response["audio_download_url"] = url_for('serve_downloaded_file', 
-                                                                    relative_file_path=response["audio_relative_path"], 
+                            response["audio_download_url"] = url_for('serve_downloaded_file',
+                                                                    relative_file_path=response["audio_relative_path"],
                                                                     _external=True)
                         else:
                             audio_error = f"Audio file not found post-processing at {response['audio_server_path']}."
                             app.logger.error(audio_error)
                             if not response["error"]: response["error"] = audio_error
-                            response["audio_server_path"] = None 
+                            response["audio_server_path"] = None
                             response["audio_relative_path"] = None
             except Exception as e_audio:
                 audio_error = f"Unexpected error during audio extraction: {str(e_audio)}"
                 app.logger.error(f"Error in audio extraction: {e_audio}", exc_info=True)
                 if not response["error"]: response["error"] = audio_error
-    
-    is_youtube_url = "youtube.com/" in video_url or "youtu.be/" in video_url
+
+    is_youtube_url = "youtube.com/" in video_url if video_url else False # Added check for video_url
     if perform_transcript_extraction and is_youtube_url:
         temp_vtt_basename = f"transcript_{uuid.uuid4().hex}"
         temp_vtt_dir = TRANSCRIPTS_TEMP_DIR
         output_template_transcript_abs = os.path.join(temp_vtt_dir, temp_vtt_basename)
-        
+
         common_opts_transcript = _get_common_ydl_opts()
         ydl_opts_transcript = {
             **common_opts_transcript,
             'writesubtitles': True, 'writeautomaticsub': True,
-            # --- THIS IS THE MODIFIED LINE ---
+            # --- MODIFIED LANGUAGE PRIORITY ---
             'subtitleslangs': ['en', 'ro'], # Try English first, then Romanian
             # --- END OF MODIFICATION ---
             'subtitlesformat': 'vtt', 'skip_download': True,
@@ -195,11 +195,11 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
             with yt_dlp.YoutubeDL(ydl_opts_transcript) as ydl_transcript:
                 app.logger.info(f"Starting transcript download for {video_url} (langs: en, ro)...")
                 info_dict_subs = ydl_transcript.extract_info(video_url, download=True)
-                
+
                 requested_subs = info_dict_subs.get('requested_subtitles')
                 if requested_subs:
-                    # --- MODIFIED LOGIC TO RESPECT NEW ORDER ---
-                    for lang_code in ['en', 'ro']: 
+                    # --- MODIFIED LOGIC TO RESPECT NEW LANGUAGE ORDER ---
+                    for lang_code in ['en', 'ro']:
                     # --- END OF MODIFICATION ---
                         if lang_code in requested_subs:
                             sub_info = requested_subs[lang_code]
@@ -208,8 +208,9 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                                 response["transcript_language_detected"] = lang_code
                                 app.logger.info(f"Transcript VTT downloaded: {downloaded_vtt_path} (Lang: {lang_code})")
                                 break
-                if not downloaded_vtt_path: 
-                    # --- MODIFIED LOGIC TO RESPECT NEW ORDER ---
+                if not downloaded_vtt_path:
+                    app.logger.info("Transcript path not in 'requested_subtitles', scanning directory...")
+                    # --- MODIFIED LOGIC TO RESPECT NEW LANGUAGE ORDER ---
                     for lang in ['en', 'ro']:
                     # --- END OF MODIFICATION ---
                         potential_path = os.path.join(temp_vtt_dir, f"{temp_vtt_basename}.{lang}.vtt")
@@ -218,7 +219,7 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                             response["transcript_language_detected"] = lang
                             app.logger.info(f"Transcript VTT found by scan: {downloaded_vtt_path} (Lang: {lang})")
                             break
-                
+
                 if downloaded_vtt_path:
                     with open(downloaded_vtt_path, 'r', encoding='utf-8') as f_vtt:
                         vtt_content = f_vtt.read()
@@ -227,8 +228,8 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
                 else:
                     transcript_error = "Transcript VTT not found or not available in EN/RO."
                     app.logger.warning(transcript_error + f" for {video_url}")
-                    if not response["error"]: response["error"] = transcript_error 
-        
+                    if not response["error"]: response["error"] = transcript_error
+
         except yt_dlp.utils.DownloadError as de_subs:
             transcript_error = f"yt-dlp DownloadError during transcript fetch: {str(de_subs)}"
             app.logger.error(transcript_error + f" for {video_url}")
@@ -239,10 +240,17 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
             if not response["error"]: response["error"] = transcript_error
         finally:
             if downloaded_vtt_path and os.path.exists(downloaded_vtt_path):
-                safe_delete_file(downloaded_vtt_path)
+                # Double check before deleting
+                if os.path.exists(downloaded_vtt_path):
+                    try:
+                        os.remove(downloaded_vtt_path)
+                        app.logger.info(f"Deleted temporary transcript file: {downloaded_vtt_path}")
+                    except Exception as e_del:
+                        app.logger.error(f"Error deleting temporary VTT file {downloaded_vtt_path}: {e_del}")
+
     elif perform_transcript_extraction and not is_youtube_url:
         app.logger.info(f"Transcript extraction skipped for non-YouTube URL: {video_url}")
-        response["transcript_text"] = "Transcript extraction only supported for YouTube URLs."
+        response["transcript_text"] = "Transcript extraction currently only supported for YouTube URLs by this endpoint."
 
     return response
 
@@ -250,9 +258,9 @@ def process_video_details(video_url, perform_audio_extraction=True, perform_tran
 def api_process_video_details_route():
     app.logger.info("Received request for /api/process_video_details")
     video_url_param = request.args.get('url')
-    
-    is_youtube = "youtube.com/" in video_url_param or "youtu.be/" in video_url_param
-    
+
+    is_youtube = "youtube.com/" in video_url_param if video_url_param else False # Check if video_url_param is not None
+
     get_audio_str = request.args.get('get_audio', 'true').lower()
     default_get_transcript = 'true' if is_youtube else 'false'
     get_transcript_str = request.args.get('get_transcript', default_get_transcript).lower()
@@ -263,14 +271,16 @@ def api_process_video_details_route():
 
     perform_audio = get_audio_str == 'true'
     perform_transcript = get_transcript_str == 'true'
-    
+
     app.logger.info(f"Processing URL: {video_url_param}, Get Audio: {perform_audio}, Get Transcript: {perform_transcript}")
-    
-    result = process_video_details(video_url_param, 
-                                   perform_audio_extraction=perform_audio, 
+
+    result = process_video_details(video_url_param,
+                                   perform_audio_extraction=perform_audio,
                                    perform_transcript_extraction=perform_transcript)
 
-    status_code = 500 if result.get("error") and not (result.get("audio_download_url") or result.get("transcript_text")) else 200
+    critical_error_occured = result.get("error") and not (result.get("audio_download_url") or result.get("transcript_text"))
+    status_code = 500 if critical_error_occured else 200
+
     return jsonify(result), status_code
 
 @app.route('/files/<path:relative_file_path>')
